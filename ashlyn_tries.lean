@@ -28,38 +28,28 @@ deriving Inhabited, BEq
 
 
 def nproc : IO Nat := do
-  let os := if getOS! == .macos then "macos" else if getOS! == .linux then "linux" else "windows"
-  if os == "windows" then
-    let out ← IO.Process.output {cmd := "wmic", args := #["cpu", "get", "NumberOfLogicalProcessors"]}
-    let out2 := (out.stdout.splitOn "¬").getD 1 "0" 
-    let out2 := out2.trim
-    return out2.toNat!
+  if Platform.isWindows then
+    let out ← IO.Process.output {cmd := "cmd", args := #["/C", "echo %NUMBER_OF_PROCESSORS%"]}
+    return out.stdout.trim.toNat!
   else
     let out ← IO.Process.output {cmd := "nproc", stdin := .null}
     return out.stdout.trim.toNat!
 
 
 def getArch? : IO (Option SupportedArch) := do
-  let os := if getOS! == .macos then "macos" else if getOS! == .linux then "linux" else "windows"
-  if os == "windows" then
-    let out ← IO.Process.output {cmd := "wmic", args := #["cpu", "get", "Architecture"]}
-    let arch := (out.stdout.splitOn "¬").getD 1 "0"
-    let arch := arch.trim 
-    if arch == "12" then 
-      return some .arm64 
-    else if arch == "9" then 
-      return some .x86_64 
-    else
-      return none 
+  let output ← if Platform.isWindows then
+    IO.Process.output {cmd := "cmd", args := #["/C", "echo %PROCESSOR_ARCHITECTURE%"]}
   else
-    let out ← IO.Process.output {cmd := "uname", args := #["-m"], stdin := .null}
-    let arch := out.stdout.trim
-    if arch ∈ ["arm64", "aarch64"] then
-      return some .arm64
-    else if arch == "x86_64" then
-      return some .x86_64
-    else
-      return none
+    IO.Process.output {cmd := "uname", args := #["-m"], stdin := .null}
+  
+  let arch := output.stdout.trim
+  
+  if arch ∈ ["arm64", "aarch64"] then
+    return some .arm64
+  else if arch == "x86_64" || (Platform.isWindows && arch == "AMD64") then
+    return some .x86_64
+  else
+    return none
 
 
 def getArch! : IO SupportedArch := do
@@ -74,9 +64,8 @@ def isArm! : IO Bool := do
 
 
 def hasCUDA : IO Bool := do
-  let os := if getOS! == .macos then "macos" else if getOS! == .linux then "linux" else "windows"
   let out ← 
-    if os == "windows" then 
+    if Platform.isWindows then 
       IO.Process.output {cmd := "where", args := #["nvcc"], stdin := .null}
     else 
       IO.Process.output {cmd := "which", args := #["nvcc"], stdin := .null}
@@ -88,8 +77,8 @@ def useCUDA : IO Bool := do
 
 
 def buildArchiveName : String :=
-  let arch := if run_io isArm! then "arm64" else "x86_64" -- this works with any system rn
-  let os := if getOS! == .macos then "macOS" else if getOS! == .linux then "linux" else "windows" -- this doesn't 
+  let arch := if run_io isArm! then "arm64" else "x86_64" 
+  let os := if getOS! == .macos then "macOS" else if getOS! == .linux then "linux" else "windows" 
   if run_io useCUDA then
     s!"{arch}-cuda-{os}.tar.gz"
   else
@@ -236,7 +225,7 @@ def getCt2CmakeFlags : IO (Array String) := do
   | .macos => flags := flags ++ #["-DWITH_ACCELERATE=ON", "-DWITH_OPENBLAS=OFF"]
   | .linux => flags := flags ++ #["-DWITH_ACCELERATE=OFF", "-DWITH_OPENBLAS=ON", "-DOPENBLAS_INCLUDE_DIR=../../OpenBLAS", "-DOPENBLAS_LIBRARY=../../OpenBLAS/libopenblas.so"]
   -- ask about this
-  | .windows => flats := flags ++ #[ctcmake flags windows]
+  | .windows => flags := flags ++ #["-DWITH_ACCELERATE=OFF", "-DWITH_OPENBLAS=OFF"]
   -- [TODO] Temporary fix: Do not use CUDA even if it is available.
   -- if ← useCUDA then
   --   flags := flags ++ #["-DWITH_CUDA=ON", "-DWITH_CUDNN=ON"]
@@ -276,7 +265,7 @@ target libctranslate2 pkg : FilePath := do
         }
 
         ensureDirExists $ pkg.buildDir / "include"
-        if getOS == .linux || getOS == .windows then 
+        if getOS! == .linux || getOS! == .windows then 
           proc {
             cmd := "cp"
             args := #[(ct2Dir / "build" / nameToSharedLib "ctranslate2").toString, dst.toString]
