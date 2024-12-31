@@ -43,7 +43,7 @@ def getArch? : IO (Option SupportedArch) := do
     IO.Process.output {cmd := "uname", args := #["-m"], stdin := .null}
   
   let arch := output.stdout.trim
-  
+  --windows outputs AMD64 as well--
   if arch ∈ ["arm64", "aarch64"] then
     return some .arm64
   else if arch == "x86_64" || (Platform.isWindows && arch == "AMD64") then
@@ -64,11 +64,7 @@ def isArm! : IO Bool := do
 
 
 def hasCUDA : IO Bool := do
-  let out ← 
-    if Platform.isWindows then 
-      IO.Process.output {cmd := "where", args := #["nvcc"], stdin := .null}
-    else 
-      IO.Process.output {cmd := "which", args := #["nvcc"], stdin := .null}
+  let out ← IO.Process.output {cmd := "which", args := #["nvcc"], stdin := .null}
   return out.exitCode == 0
 
 
@@ -77,7 +73,7 @@ def useCUDA : IO Bool := do
 
 
 def buildArchiveName : String :=
-  let arch := if run_io isArm! then "arm64" else "x86_64" 
+  let arch := if run_io isArm! then "arm64" else "x86_64"
   let os := if getOS! == .macos then "macOS" else if getOS! == .linux then "linux" else "windows" 
   if run_io useCUDA then
     s!"{arch}-cuda-{os}.tar.gz"
@@ -125,21 +121,21 @@ lean_lib LeanCopilotTests {
 
 
 private def nameToVersionedSharedLib (name : String) (v : String) : String :=
-  if Platform.isWindows then s!"lib{name}.{v}.dll"
+  if Platform.isWindows then s!"{name}.{v}.dll"
   else if Platform.isOSX  then s!"lib{name}.{v}.dylib"
   else s!"lib{name}.so.{v}"
 
 
 def afterReleaseSync {α : Type} (pkg : Package) (build : SpawnM (Job α)) : FetchM (Job α) := do
   if pkg.preferReleaseBuild ∧ pkg.name ≠ (← getRootPackage).name then
-    (← pkg.release.fetch).bindAsync fun _ _ => build
+    (← pkg.optGitHubRelease.fetch).bindAsync fun _ _ => build
   else
     build
 
 
 def afterReleaseAsync {α : Type} (pkg : Package) (build : JobM α) : FetchM (Job α) := do
   if pkg.preferReleaseBuild ∧ pkg.name ≠ (← getRootPackage).name then
-    (← pkg.release.fetch).bindSync fun _ _ => build
+    (← pkg.optGitHubRelease.fetch).bindSync fun _ _ => build
   else
     Job.async build
 
@@ -224,8 +220,7 @@ def getCt2CmakeFlags : IO (Array String) := do
   match getOS! with
   | .macos => flags := flags ++ #["-DWITH_ACCELERATE=ON", "-DWITH_OPENBLAS=OFF"]
   | .linux => flags := flags ++ #["-DWITH_ACCELERATE=OFF", "-DWITH_OPENBLAS=ON", "-DOPENBLAS_INCLUDE_DIR=../../OpenBLAS", "-DOPENBLAS_LIBRARY=../../OpenBLAS/libopenblas.so"]
-  -- ask about this
-  | .windows => flags := flags ++ #["-DWITH_ACCELERATE=OFF", "-DWITH_OPENBLAS=OFF"]
+  | .windows => flags := flags ++ #["-DWITH_ACCELERATE=ON"]
   -- [TODO] Temporary fix: Do not use CUDA even if it is available.
   -- if ← useCUDA then
   --   flags := flags ++ #["-DWITH_CUDA=ON", "-DWITH_CUDNN=ON"]
@@ -265,63 +260,33 @@ target libctranslate2 pkg : FilePath := do
         }
 
         ensureDirExists $ pkg.buildDir / "include"
-        if getOS! == .linux || getOS! == .windows then 
-          proc {
-            cmd := "cp"
-            args := #[(ct2Dir / "build" / nameToSharedLib "ctranslate2").toString, dst.toString]
-          }
-          -- TODO: Don't hardcode the version "4".
-          let dst' := pkg.nativeLibDir / (nameToVersionedSharedLib "ctranslate2" "4")
-          proc {
-            cmd := "cp"
-            args := #[dst.toString, dst'.toString]
-          }
-          proc {
-            cmd := "cp"
-            args := #["-r", (ct2Dir / "include" / "ctranslate2").toString, (pkg.buildDir / "include" / "ctranslate2").toString]
-          }
-          proc {
-            cmd := "cp"
-            args := #["-r", (ct2Dir / "include" / "nlohmann").toString, (pkg.buildDir / "include" / "nlohmann").toString]
-          }
-          proc {
-            cmd := "cp"
-            args := #["-r", (ct2Dir / "include" / "half_float").toString, (pkg.buildDir / "include" / "half_float").toString]
-          }
-          proc {
-            cmd := "rm"
-            args := #["-rf", ct2Dir.toString]
-          }
-        return (dst, trace)
-      else 
         proc {
-          cmd := "copy"
+          cmd := "cp"
           args := #[(ct2Dir / "build" / nameToSharedLib "ctranslate2").toString, dst.toString]
         }
         -- TODO: Don't hardcode the version "4".
         let dst' := pkg.nativeLibDir / (nameToVersionedSharedLib "ctranslate2" "4")
         proc {
-          cmd := "copy"
+          cmd := "cp"
           args := #[dst.toString, dst'.toString]
         }
         proc {
-          cmd := "copy"
+          cmd := "cp"
           args := #["-r", (ct2Dir / "include" / "ctranslate2").toString, (pkg.buildDir / "include" / "ctranslate2").toString]
         }
         proc {
-          cmd := "copy"
+          cmd := "cp"
           args := #["-r", (ct2Dir / "include" / "nlohmann").toString, (pkg.buildDir / "include" / "nlohmann").toString]
         }
         proc {
-          cmd := "copy"
+          cmd := "cp"
           args := #["-r", (ct2Dir / "include" / "half_float").toString, (pkg.buildDir / "include" / "half_float").toString]
         }
         proc {
-          cmd := "del"
-          --- not sure what does this. what arguments should i be passing into del?
-          args := #["-/s", ct2Dir.toString]
+          cmd := "rm"
+          args := #["-rf", ct2Dir.toString]
         }
-        
+      return (dst, trace)
     else
       return (dst, ← computeTrace dst)
 
@@ -346,6 +311,13 @@ extern_lib libleanffi pkg := do
   let name := nameToStaticLib "leanffi"
   let ct2O ← ct2.o.fetch
   buildStaticLib (pkg.nativeLibDir / name) #[ct2O]
+
+
+require batteries from git "https://github.com/leanprover-community/batteries.git" @ "main"
+require aesop from git "https://github.com/leanprover-community/aesop" @ "master"
+
+meta if get_config? env = some "dev" then -- dev is so not everyone has to build it
+require «doc-gen4» from git "https://github.com/leanprover/doc-gen4" @ "main"
 
 
 require batteries from git "https://github.com/leanprover-community/batteries.git" @ "9c6c2d647e57b2b7a0b42dd8080c698bd33a1b6f" -- Lean v4.11.0
